@@ -38,6 +38,14 @@ env:
   MANIFEST_BRANCH: 'android-14.0'
   SRC_DIR: 'aosp'
   CCACHE_DIR: '${{ github.workspace }}/.ccache'
+  # AOSP 14 defaults to Bazel mixed builds (defaultBazelProdMode == true),
+  # which makes soong run bp2build: a second full analysis of every
+  # Android.bp in the tree, just to emit Bazel BUILD files we never use.
+  # On a cold 513-project tree that single step burned 44+ minutes and most
+  # of the runner's RAM before the first run died. soong's own comment on
+  # the flag: "for users which experience broken bazel-handled builds, or
+  # significant performance regressions."
+  BUILD_BROKEN_DISABLE_BAZEL: 'true'
 
 jobs:
   build:

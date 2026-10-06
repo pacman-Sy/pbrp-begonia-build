@@ -14,7 +14,9 @@ on:
       jobs:
         description: 'Parallel make jobs'
         required: false
-        default: '4'
+        # android-14.0 has ~2x the projects of android-12.1 and a cold ccache;
+        # at -j4 the compile starved the runner for RAM (see the Compile step).
+        default: '2'
       ccache:
         description: 'Use ccache (true/false)'
         required: false
@@ -54,7 +56,7 @@ jobs:
           echo "manifest   : $MANIFEST_URL @ $MANIFEST_BRANCH"
           echo "lunch      : ${{ inputs.makefile || 'pb_begonia-eng' }}"
           echo "target     : ${{ inputs.build_target || 'recoveryimage' }}"
-          echo "jobs       : ${{ inputs.jobs || '4' }}"
+          echo "jobs       : ${{ inputs.jobs || '2' }}"
           echo "ccache     : ${{ inputs.ccache || 'true' }}"
           echo "free space before:"
           df -h /
@@ -114,8 +116,12 @@ jobs:
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          # Prefer paging out over stalling: a stalled shell means the runner
+          # agent misses its heartbeat and GitHub reports "lost communication".
+          sudo sysctl -w vm.swappiness=100
           echo "=== swap after ==="
           swapon --show
+          free -h
           free -h
 
       - name: Install repo launcher
@@ -186,15 +192,73 @@ jobs:
         env:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
-          BUILD_JOBS: ${{ inputs.jobs || '4' }}
+          BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'pb_begonia-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'recoveryimage' }}
         run: |
           cd "$SRC_DIR"
           set -o pipefail
+          # Drop this step's priority so the runner agent keeps enough CPU to
+          # heartbeat. Losing the heartbeat makes GitHub discard the whole job
+          # (and its logs) with "The hosted runner lost communication".
+          renice -n 10 -p $$ 2>/dev/null || true
           source build/envsetup.sh
           lunch "$MAKEFILE_NAME"
-          mka "$BUILD_TARGET" -j"$BUILD_JOBS" 2>&1 | tee build.log
+
+          echo "=== resources before compile ==="
+          free -h
+          df -h /
+          cat /proc/loadavg
+
+          RESMON="$GITHUB_WORKSPACE/resmon.log"
+          (
+            while true; do
+              {
+                printf -- '--- %s ---\n' "$(date -u +%FT%TZ)"
+                free -h
+                df -h /
+                cat /proc/loadavg
+              } >> "$RESMON" 2>&1
+              sleep 30
+            done
+          ) &
+          MONITOR=$!
+
+          # Own subshell so the pipeline's exit status survives for `wait`.
+          (
+            set -o pipefail
+            mka "$BUILD_TARGET" -j"$BUILD_JOBS" 2>&1 | tee build.log
+          ) &
+          BUILD=$!
+
+          ABORT=""
+          while kill -0 "$BUILD" 2>/dev/null; do
+            AVAIL_KB=$(df --output=avail -k . 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+            MEM_KB=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo || true)
+            SWAP_KB=$(awk '/^SwapFree:/{print $2}' /proc/meminfo || true)
+            if [ -n "$AVAIL_KB" ] && [ "$AVAIL_KB" -lt 3145728 ]; then
+              ABORT="disk below 3 GB free"
+            elif [ -n "$MEM_KB" ] && [ -n "$SWAP_KB" ] && [ $((MEM_KB + SWAP_KB)) -lt 786432 ]; then
+              ABORT="RAM+swap below ~768 MB"
+            fi
+            if [ -n "$ABORT" ]; then
+              echo "::error::resource guard tripped: $ABORT"
+              printf 'ABORT: %s\n' "$ABORT" >> "$RESMON"
+              pkill -TERM -f 'soong_ui|ninja|soong_build|ckati|ld.lld|javac' 2>/dev/null || true
+              sleep 15
+              pkill -KILL -f 'soong_ui|ninja|soong_build|ckati|ld.lld|javac' 2>/dev/null || true
+              break
+            fi
+            sleep 15
+          done
+
+          STATUS=0
+          wait "$BUILD" || STATUS=$?
+          kill "$MONITOR" 2>/dev/null || true
+          echo "=== resources after compile (exit $STATUS) ==="
+          free -h
+          df -h /
+          exit "$STATUS"
 
       - name: Locate and verify output image
         id: image
@@ -225,8 +289,15 @@ jobs:
       - name: Dump build logs on failure
         if: failure()
         run: |
+          echo "=== host resources right now ==="
+          free -h
+          df -h /
+          cat /proc/loadavg
+          echo
+          echo "=== resource monitor log ==="
+          cat "$GITHUB_WORKSPACE/resmon.log" 2>/dev/null || echo "(none)"
           if [ ! -d "$SRC_DIR" ]; then
-            echo "source tree '$SRC_DIR' does not exist; nothing to dump"
+            echo "source tree '$SRC_DIR' does not exist; nothing else to dump"
             exit 0
           fi
           cd "$SRC_DIR"
@@ -255,6 +326,7 @@ jobs:
           path: |
             $SRC_DIR/build.log
             $SRC_DIR/out/error.log
+            resmon.log
           if-no-files-found: ignore
           retention-days: 7
 

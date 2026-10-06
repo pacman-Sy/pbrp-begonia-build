@@ -93,10 +93,17 @@ jobs:
 
       - name: Add swap (recovery link steps are memory hungry)
         run: |
-          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          echo "=== swap before ==="
+          swapon --show || true
+          free -h
+          sudo timeout 120 swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          echo "=== swap after ==="
+          swapon --show
           free -h
 
       - name: Install repo launcher
@@ -206,6 +213,10 @@ jobs:
       - name: Dump build logs on failure
         if: failure()
         run: |
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "source tree '$SRC_DIR' does not exist; nothing to dump"
+            exit 0
+          fi
           cd "$SRC_DIR"
           echo "=== out/error.log ==="
           cat out/error.log 2>/dev/null || echo "(none)"

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <remote name="pacsai" fetch="https://github.com/pacman-Sy" />
+
+    <remove-project name="vendor_utils" />
+
+    <project path="device/xiaomi/begonia"
+             name="device_xiaomi_begonia-pbrp"
+             remote="pacsai"
+             revision="twrp-12.1"
+             clone-depth="1" />
+</manifest>

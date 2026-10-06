@@ -206,13 +206,57 @@ jobs:
         run: |
           cd "$SRC_DIR"
           set -o pipefail
+
+          # GitHub discards a job's entire log if its runner stops answering,
+          # and `gh run cancel` destroys it too - three runs in a row produced
+          # no log at all. Annotations are streamed to GitHub the moment they
+          # are written, so report the diagnosis there instead of relying on
+          # the log surviving.
+          STAGE=init
+          BUILD=""
+          MONITOR=""
+          WARNSTATE=""
+          esc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/\r/%0D/g'; }
+          note() { echo "::error title=$(esc "$1")::$(esc "$2")"; }
+          warn() { echo "::warning title=$(esc "$1")::$(esc "$2")"; }
+          # A runner that dies takes its whole log with it, but notices sent
+          # before the death stay on the run - so record every stage change.
+          stage() { STAGE="$1"; echo "::notice title=compile stage::$STAGE"; }
+          report() {
+            local rc="$1"
+            note "Compile failed" "stage=${STAGE} exit=${rc} jobs=${BUILD_JOBS}"
+            if [ -s build.log ]; then
+              note "build.log tail" "$(tail -n 14 build.log | tr '\n' '|')"
+            else
+              note "build.log tail" "(empty - died before mka wrote anything)"
+            fi
+            note "resources" "$(free -h | tr '\n' ';') | root:$(df -h / | tail -1 | tr -s ' ')"
+          }
+          on_exit() {
+            local rc=$?
+            trap - EXIT
+            { [ -n "$MONITOR" ] && kill "$MONITOR" 2>/dev/null; } || true
+            if [ "$rc" -ne 0 ]; then
+              report "$rc"
+              # Do not leave ninja/soong orphaned: a wedged process tree is
+              # how the previous jobs ended up never sending their completion.
+              pkill -TERM -f 'soong_ui.bash|bin/ninja|soong_build|ckati' 2>/dev/null || true
+            fi
+            exit "$rc"
+          }
+          trap on_exit EXIT
+
           # Drop this step's priority so the runner agent keeps enough CPU to
           # heartbeat. Losing the heartbeat makes GitHub discard the whole job
           # (and its logs) with "The hosted runner lost communication".
           renice -n 10 -p $$ 2>/dev/null || true
+
+          stage envsetup
           source build/envsetup.sh
+          stage lunch
           lunch "$MAKEFILE_NAME"
 
+          stage resources
           echo "=== resources before compile ==="
           free -h
           df -h /
@@ -232,6 +276,7 @@ jobs:
           ) &
           MONITOR=$!
 
+          stage build
           # Own subshell so the pipeline's exit status survives for `wait`.
           (
             set -o pipefail
@@ -239,6 +284,7 @@ jobs:
           ) &
           BUILD=$!
 
+          stage guard
           ABORT=""
           while kill -0 "$BUILD" 2>/dev/null; do
             AVAIL_KB=$(df --output=avail -k . 2>/dev/null | tail -1 | tr -dc '0-9' || true)
@@ -249,20 +295,30 @@ jobs:
             elif [ -n "$MEM_KB" ] && [ -n "$SWAP_KB" ] && [ $((MEM_KB + SWAP_KB)) -lt 786432 ]; then
               ABORT="RAM+swap below ~768 MB"
             fi
+            NEAR=""
+            if [ -n "$AVAIL_KB" ] && [ "$AVAIL_KB" -lt 6291456 ]; then
+              NEAR="disk ${AVAIL_KB} kB free"
+            elif [ -n "$MEM_KB" ] && [ -n "$SWAP_KB" ] && [ $((MEM_KB + SWAP_KB)) -lt 1572864 ]; then
+              NEAR="RAM+swap $(( (MEM_KB + SWAP_KB) / 1024 )) MB free"
+            fi
+            if [ -n "$NEAR" ] && [ "$NEAR" != "$WARNSTATE" ]; then
+              WARNSTATE="$NEAR"
+              warn "resources low" "$NEAR at stage=$STAGE | last: $(tail -n 1 build.log 2>/dev/null | tr '\n' ' ')"
+            fi
             if [ -n "$ABORT" ]; then
-              echo "::error::resource guard tripped: $ABORT"
+              note "resource guard tripped" "$ABORT (built so far: $(tail -n 1 build.log 2>/dev/null | tr '\n' ' '))"
               printf 'ABORT: %s\n' "$ABORT" >> "$RESMON"
-              pkill -TERM -f 'soong_ui|ninja|soong_build|ckati|ld.lld|javac' 2>/dev/null || true
+              pkill -TERM -f 'soong_ui.bash|bin/ninja|soong_build|ckati|ld.lld' 2>/dev/null || true
               sleep 15
-              pkill -KILL -f 'soong_ui|ninja|soong_build|ckati|ld.lld|javac' 2>/dev/null || true
+              pkill -KILL -f 'soong_ui.bash|bin/ninja|soong_build|ckati|ld.lld' 2>/dev/null || true
               break
             fi
             sleep 15
           done
 
+          stage wait
           STATUS=0
           wait "$BUILD" || STATUS=$?
-          kill "$MONITOR" 2>/dev/null || true
           echo "=== resources after compile (exit $STATUS) ==="
           free -h
           df -h /

@@ -6,25 +6,31 @@ GitHub Actions recipe that compiles **PBRP** (PitchBlack Recovery Project)
 Everything is derived from the device tree and PBRP sources published by
 **SaiKrishna1504**.
 
+## Branches
+
+| Branch | Manifest | Device tree | Status |
+|---|---|---|---|
+| `main` | `manifest_pb@android-12.1` / `vendor_pb@pb-12.1` | `twrp-12.1` | built and verified |
+| `android-14.0` | `manifest_pb@android-14.0` / `vendor_pb@pb-14.0` | `pb-14.0` | port in progress |
+
 ## What this builds
 
 | | |
 |---|---|
-| PBRP manifest | `PitchBlackRecoveryProject/manifest_pb` @ `android-12.1` |
-| Recovery source | `PitchBlackRecoveryProject/android_bootable_recovery` @ `android-12.1` |
-| PBRP vendor config | `PitchBlackRecoveryProject/vendor_pb` @ `pb-12.1` |
-| Device tree | `pacman-Sy/device_xiaomi_begonia-pbrp` @ `twrp-12.1` (fork of `SaiKrishna1504/device_xiaomi_begonia-pbrp`) |
+| PBRP manifest | `PitchBlackRecoveryProject/manifest_pb` @ `android-14.0` |
+| Recovery source | `PitchBlackRecoveryProject/android_bootable_recovery` @ `android-14.0` |
+| PBRP vendor config | `PitchBlackRecoveryProject/vendor_pb` @ `pb-14.0` |
+| Device tree | `pacman-Sy/device_xiaomi_begonia-pbrp` @ `pb-14.0` (fork of `SaiKrishna1504/device_xiaomi_begonia-pbrp`) |
 | Product / lunch | `pb_begonia` / `pb_begonia-eng` |
 | Make target | `recoveryimage` |
 | Output | `out/target/product/begonia/recovery.img` |
 
 ## Device tree branch selection
 
-`device_xiaomi_begonia-pbrp` has three branches, and only one is PBRP:
-
 | Branch | Product file | Project |
 |---|---|---|
-| `twrp-12.1` | `pb_begonia.mk` | **PBRP — this is the one we use** |
+| `pb-14.0` | `pb_begonia.mk` | **PBRP — used by this branch** |
+| `twrp-12.1` | `pb_begonia.mk` | PBRP — used by `main` |
 | `dynamic` | `omni_begonia.mk` | TWRP / OmniROM |
 | `fbev2` | `omni_begonia.mk` | TWRP / OmniROM |
 
@@ -43,7 +49,8 @@ Everything is derived from the device tree and PBRP sources published by
 
 ## Upstream breakage worked around
 
-`manifest_pb/android-12.1/pbrp-default.xml` declares:
+`manifest_pb/pbrp-default.xml` on **both** `android-12.1` and `android-14.0`
+declares:
 
 ```xml
 <project path="vendor/utils" name="vendor_utils"
@@ -71,6 +78,18 @@ kernel build, proprietary vendor blobs, or hardware trees are needed.
 and `BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES` to `true` to tolerate the
 reduced `remove-minimal.xml` tree, and sets `PLATFORM_SECURITY_PATCH` to
 `2099-12-31` to bypass AVB rollback checks.
+
+## android-14.0 notes
+
+- Upstream ships **no** begonia device tree for `android-14.0` (only
+  `android-9.0`), so `pb-14.0` is a device-tree port, not a version bump.
+- `remove-minimal.xml` on `android-14.0` keeps ~513 projects where
+  `android-12.1` kept ~252, so the checkout is substantially larger. The
+  workflow's disk-cleanup and post-sync trim steps exist for that reason.
+- AOSP 14 builds against `prebuilts/jdk/jdk17` (present in the manifest);
+  the workflow installs JDK 17 only so the system default matches.
+- `vendor_utils` is still declared dead on `android-14.0`, so the
+  `<remove-project>` workaround is still required.
 
 ## Repository layout
 

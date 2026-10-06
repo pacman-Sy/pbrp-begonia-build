@@ -216,6 +216,7 @@ jobs:
           BUILD=""
           MONITOR=""
           WARNSTATE=""
+          LOWCOUNT=0
           esc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/\r/%0D/g'; }
           note() { echo "::error title=$(esc "$1")::$(esc "$2")"; }
           warn() { echo "::warning title=$(esc "$1")::$(esc "$2")"; }
@@ -280,7 +281,7 @@ jobs:
           # Own subshell so the pipeline's exit status survives for `wait`.
           (
             set -o pipefail
-            mka "$BUILD_TARGET" -j"$BUILD_JOBS" 2>&1 | tee build.log
+            mka --skip-soong-tests "$BUILD_TARGET" -j"$BUILD_JOBS" 2>&1 | tee build.log
           ) &
           BUILD=$!
 
@@ -304,6 +305,15 @@ jobs:
             if [ -n "$NEAR" ] && [ "$NEAR" != "$WARNSTATE" ]; then
               WARNSTATE="$NEAR"
               warn "resources low" "$NEAR at stage=$STAGE | last: $(tail -n 1 build.log 2>/dev/null | tr '\n' ' ')"
+            fi
+            if [ -n "$ABORT" ]; then
+              LOWCOUNT=$((LOWCOUNT + 1))
+              if [ "$LOWCOUNT" -lt 4 ]; then
+                warn "resources critical" "$ABORT - sample $LOWCOUNT/4, waiting to see if it recovers"
+                ABORT=""
+              fi
+            else
+              LOWCOUNT=0
             fi
             if [ -n "$ABORT" ]; then
               note "resource guard tripped" "$ABORT (built so far: $(tail -n 1 build.log 2>/dev/null | tr '\n' ' '))"
@@ -388,8 +398,10 @@ jobs:
         with:
           name: build-logs
           path: |
-            $SRC_DIR/build.log
-            $SRC_DIR/out/error.log
+            ${{ env.SRC_DIR }}/build.log
+            ${{ env.SRC_DIR }}/out/error.log
+            ${{ env.SRC_DIR }}/out/soong/soong.log
+            ${{ env.SRC_DIR }}/out/soong/soong_build_error.log
             resmon.log
           if-no-files-found: ignore
           retention-days: 7
